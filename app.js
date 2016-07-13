@@ -1,5 +1,5 @@
 // The env variable LDAP_OPTS is something like this:
-// {"port":389, "basedn":"dc=someco, dc=com", "company": "Someco", "datasource":{"user": "username","password": "your_password", "database": "schema_name"}}
+// {"port":1389, "basedn":"dc=someco, dc=com", "company": "Someco", "datasource":{"user": "username","password": "your_password", "database": "schema_name"}}
 var ldap = require('ldapjs'),
     encryptor = require('./encryptor'),
     mysql = require("mysql"),
@@ -13,6 +13,7 @@ var ldap = require('ldapjs'),
 server.bind(basedn, function (req, res, next) {
     var username = req.dn.toString().replace(basedn,'').replace(/^cn=|,\s$/g,''),
         password = req.credentials;
+
     var encryptedPassword = encryptor.encrypt(password);
     db.query("select id from user where email=? collate utf8_bin " +
         "and password=? collate utf8_bin and locked=0",
@@ -30,32 +31,65 @@ server.bind(basedn, function (req, res, next) {
 });
 
 server.search(basedn, function(req, res, next) {
-    var binddn = req.connection.ldap.bindDN.toString();
-    var username = binddn.replace(basedn,'').replace(/^cn=|,\s$/g,'')
+    var usernameExtractedFromBindDN = req.connection.ldap.bindDN.toString().replace(basedn,'').replace(/^cn=|,\s$/g,'');
+    var usernameExtractedFromBaseObject = req.baseObject.toString().replace(basedn,'').replace(/^cn=|,\s$/g,'');
+    if(!usernameExtractedFromBaseObject) {
+        if(usernameExtractedFromBindDN == 'admin') {
+            db.query("select * from user where locked=0", function(err, rs) {
+                rsHandler(err, rs, req, res);
+            });
+        } else {
+            db.query("select * from user where locked=0 and email=?", [usernameExtractedFromBindDN], function(err, rs) {
+                rsHandler(err, rs, req, res);
+            });
+        }
+    } else {
+        if(usernameExtractedFromBindDN == 'admin' || usernameExtractedFromBaseObject == usernameExtractedFromBindDN) {
+            db.query("select * from user where locked=0 and email=?", [usernameExtractedFromBaseObject], function(err, rs) {
+                rsHandler(err, rs, req, res);
+            });
+        } else {
+            res.end();
+        }
+    }
+});
 
-    db.query("select * from user where email=? collate utf8_bin and locked=0", [username], function(err, rs){
-        if(rs.length) {
+function rsHandler(err, rs, req, res){
+    if(rs.length) {
+        rs.forEach(function(rec){
+            var name = rec.name;
+            var firstname, surname;
+            if(name.indexOf(' ') > -1) {
+                var arr = name.split(' ');
+                firstname = arr[0];
+                surname   = arr[1];
+            } else {
+                firstname = name.substring(1);
+                surname   = name.substring(0, 1);
+            }
             var userInfo = {
-                dn: "cn=" + rs[0].name + ", " + basedn,
+                dn: "cn=" + rec.email + ", " + basedn,
                 attributes:{
-                    objectclass: [ "top" ],
-                    cn: rs[0].name,
-                    mail: rs[0].email,
-                    dept: rs[0].dept,
-                    position: rs[0].position,
-                    city: rs[0].city,
-                    mobile: rs[0].mobile,
+                    objectclass: [ "top" ], hassubordinates: false,
+                    cn: rec.email,
+                    mail: rec.email,
+                    firstname: firstname,
+                    surname: surname,
+                    dept: rec.dept,
+                    position: rec.position,
+                    city: rec.city,
+                    mobile: rec.mobile,
                     ou: company
                 }
             };
             if (req.filter.matches(userInfo.attributes)) {
                 res.send(userInfo);
             }
-        }
-        res.end();
-    });
-});
+        })
+    }
+    res.end();
+}
 
 server.listen(ldap_port, function() {
-    console.log("LDAP server running at %s", server.url);
+    console.log("LDAP server started at %s", server.url);
 });
